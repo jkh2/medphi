@@ -11,5 +11,7 @@ venv/
 .venv/
 
 # MedPhi Local Data (CRITICAL: DO NOT COMMIT)
+# Both vault config and chroma_db now live in ~/.medphi/ — outside this repo entirely.
+# No local chroma_db/ to ignore, but keeping this as a safety net.
 .medphi/
 chroma_db/

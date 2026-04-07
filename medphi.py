@@ -27,7 +27,7 @@ load_dotenv()
 
 VAULT_DIR = Path.home() / ".medphi"
 VAULT_CONFIG = VAULT_DIR / "vault_config.json"
-CHROMA_DIR = Path("chroma_db")
+CHROMA_DIR = VAULT_DIR / "chroma_db"  # anchored to home, not CWD
 
 
 def load_vault_config() -> dict:
@@ -166,7 +166,8 @@ _OPERATORS = {
     "PHONE_NUMBER": OperatorConfig("replace", {"new_value": "[PHONE]"}),
     "EMAIL_ADDRESS": OperatorConfig("replace", {"new_value": "[EMAIL]"}),
     "LOCATION": OperatorConfig("replace", {"new_value": "[LOCATION]"}),
-    "DATE_TIME": OperatorConfig("replace", {"new_value": "[DATE]"}),
+    # DATE_TIME intentionally excluded — dates are already shifted by shift_dates()
+    # to preserve timeline relationships. Erasing them here would defeat that.
     "US_SSN": OperatorConfig("replace", {"new_value": "[SSN]"}),
     "US_PASSPORT": OperatorConfig("replace", {"new_value": "[PASSPORT]"}),
     "MEDICAL_LICENSE": OperatorConfig("replace", {"new_value": "[LICENSE]"}),
@@ -238,6 +239,10 @@ def store_document(doc_id: str, clean_text: str, metadata: dict) -> int:
 
 def query_vault(question: str, n_results: int = 5) -> list[dict]:
     collection = get_collection()
+    total = collection.count()
+    if total == 0:
+        return []
+    n_results = min(n_results, total)
     embedder = get_embedder()
     q_emb = embedder.encode([question]).tolist()
     results = collection.query(query_embeddings=q_emb, n_results=n_results)
@@ -309,13 +314,15 @@ def main():
         )
 
         if uploaded and st.button("De-identify & Store", type="primary"):
+            pdf_bytes = uploaded.read()  # read once; reuse for both extraction and hashing
+
             with st.spinner("Extracting text from PDF..."):
-                raw_text = extract_text_from_pdf(uploaded.read())
+                raw_text = extract_text_from_pdf(pdf_bytes)
 
             with st.spinner("De-identifying (removing PII, shifting dates)..."):
                 clean_text, findings = deidentify(raw_text, config["date_offset_days"])
 
-            doc_id = hashlib.sha256(uploaded.name.encode()).hexdigest()[:16]
+            doc_id = hashlib.sha256(pdf_bytes).hexdigest()[:16]  # content hash, not name
             metadata = {
                 "filename": uploaded.name,
                 "label": doc_label or uploaded.name,
@@ -348,7 +355,7 @@ def main():
         with col2:
             model = st.selectbox(
                 "Model",
-                ["gpt-4o-mini", "gpt-4o", "claude-sonnet-4-6", "ollama/mistral"],
+                ["gpt-4o-mini", "gpt-4o", "anthropic/claude-sonnet-4-6", "ollama/mistral"],
             )
 
         if question and st.button("Ask", type="primary"):
