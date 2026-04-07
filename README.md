@@ -84,7 +84,14 @@ MedPhi uses [LiteLLM](https://github.com/BerriAI/litellm), so any supported prov
 
 MedPhi ships with an MCP server so you can query your vault directly from any MCP-compatible AI client — no browser, no separate app.
 
-**Add to your MCP client config** (e.g. `~/.claude/settings.json`):
+**Add to your MCP client config:**
+
+| Client | Config file location |
+|---|---|
+| Claude Code (Mac/Linux) | `~/.claude/settings.json` |
+| Claude Code (Windows) | `%USERPROFILE%\.claude\settings.json` |
+| Cursor | `~/.cursor/mcp.json` |
+| Windsurf | `~/.codeium/windsurf/mcp_config.json` |
 
 ```json
 {
