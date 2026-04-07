@@ -80,6 +80,41 @@ MedPhi uses [LiteLLM](https://github.com/BerriAI/litellm), so any supported prov
 
 ---
 
+## MCP Server (Use MedPhi from Claude Code or Cursor)
+
+MedPhi ships with an MCP server so you can query your vault directly from any MCP-compatible AI client — no browser, no separate app.
+
+**Add to your MCP client config** (e.g. `~/.claude/settings.json`):
+
+```json
+{
+  "mcpServers": {
+    "medphi": {
+      "command": "python",
+      "args": ["/absolute/path/to/medphi/medphi_mcp_server.py"]
+    }
+  }
+}
+```
+
+**Available tools:**
+
+| Tool | What it does |
+|---|---|
+| `medphi_ingest` | Ingest a PDF by file path — de-identifies and stores it |
+| `medphi_query` | Semantic search — returns relevant de-identified chunks |
+| `medphi_list_documents` | List all stored documents with metadata |
+| `medphi_delete_document` | Remove a document and all its chunks |
+| `medphi_vault_stats` | Chunk count, doc count, vault config |
+
+Once configured, you can ask your AI assistant things like:
+> *"Search my medical vault for anything about blood pressure medication"*
+> *"What does my vault say about my 2023 cardiology visit?"*
+
+The Streamlit UI (`streamlit run medphi.py`) is still available for a visual interface.
+
+---
+
 ## Roadmap
 
 Built and shipped:
