@@ -14,6 +14,7 @@ from pathlib import Path
 import streamlit as st
 import chromadb
 import fitz  # pymupdf
+from PIL import Image
 from sentence_transformers import SentenceTransformer
 from presidio_analyzer import AnalyzerEngine, Pattern, PatternRecognizer
 from presidio_anonymizer import AnonymizerEngine
@@ -21,13 +22,22 @@ from presidio_anonymizer.entities import OperatorConfig
 from litellm import completion
 from dotenv import load_dotenv
 
+try:
+    import pytesseract
+    _OCR_AVAILABLE = True
+except ImportError:
+    _OCR_AVAILABLE = False
+
 load_dotenv()
 
 # ─── Vault Config ─────────────────────────────────────────────────────────────
 
 VAULT_DIR = Path.home() / ".medphi"
 VAULT_CONFIG = VAULT_DIR / "vault_config.json"
+DOCUMENTS_INDEX = VAULT_DIR / "documents.json"
 CHROMA_DIR = VAULT_DIR / "chroma_db"  # anchored to home, not CWD
+
+OCR_TEXT_THRESHOLD = 100  # chars; below this we assume the PDF is image-based
 
 
 def load_vault_config() -> dict:
@@ -49,6 +59,33 @@ def save_vault_config(config: dict):
     VAULT_DIR.mkdir(exist_ok=True)
     with open(VAULT_CONFIG, "w") as f:
         json.dump(config, f, indent=2)
+
+
+# ─── Document Index ───────────────────────────────────────────────────────────
+
+def load_document_index() -> dict:
+    """Return {doc_id: metadata} for all stored documents."""
+    if DOCUMENTS_INDEX.exists():
+        with open(DOCUMENTS_INDEX) as f:
+            return json.load(f)
+    return {}
+
+
+def register_document(doc_id: str, metadata: dict):
+    """Add or update a document entry in the index."""
+    index = load_document_index()
+    index[doc_id] = metadata
+    VAULT_DIR.mkdir(exist_ok=True)
+    with open(DOCUMENTS_INDEX, "w") as f:
+        json.dump(index, f, indent=2)
+
+
+def unregister_document(doc_id: str):
+    """Remove a document entry from the index."""
+    index = load_document_index()
+    index.pop(doc_id, None)
+    with open(DOCUMENTS_INDEX, "w") as f:
+        json.dump(index, f, indent=2)
 
 
 # ─── Custom Medical Recognizers (Regex) ───────────────────────────────────────
@@ -153,10 +190,40 @@ def shift_dates(text: str, offset_days: int) -> str:
 
 # ─── PDF Extraction ────────────────────────────────────────────────────────────
 
-def extract_text_from_pdf(pdf_bytes: bytes) -> str:
+def _ocr_pdf(pdf_bytes: bytes) -> str:
+    """Render each page as an image and run Tesseract OCR."""
+    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+    pages = []
+    for page in doc:
+        # Render at 2x zoom for better OCR accuracy
+        mat = fitz.Matrix(2, 2)
+        pix = page.get_pixmap(matrix=mat)
+        img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+        pages.append(pytesseract.image_to_string(img))
+    return "\n\n".join(pages)
+
+
+def extract_text_from_pdf(pdf_bytes: bytes) -> tuple[str, bool]:
+    """
+    Extract text from PDF. Returns (text, used_ocr).
+    Falls back to OCR if the PDF appears to be image-based (text < threshold).
+    Requires Tesseract binary installed for OCR fallback.
+    """
     doc = fitz.open(stream=pdf_bytes, filetype="pdf")
     pages = [page.get_text() for page in doc]
-    return "\n\n".join(pages)
+    text = "\n\n".join(pages)
+
+    if len(text.strip()) >= OCR_TEXT_THRESHOLD:
+        return text, False
+
+    # Text too sparse — likely a scanned PDF
+    if not _OCR_AVAILABLE:
+        return text, False  # return whatever we got; OCR not installed
+
+    try:
+        return _ocr_pdf(pdf_bytes), True
+    except Exception:
+        return text, False  # OCR failed; fall back to sparse text
 
 
 # ─── De-identification Pipeline ───────────────────────────────────────────────
@@ -234,7 +301,15 @@ def store_document(doc_id: str, clean_text: str, metadata: dict) -> int:
     ]
 
     collection.upsert(documents=chunks, embeddings=embeddings, ids=ids, metadatas=metadatas)
+    register_document(doc_id, {**metadata, "chunk_count": len(chunks)})
     return len(chunks)
+
+
+def delete_document(doc_id: str):
+    """Remove all chunks for a document from ChromaDB and the index."""
+    collection = get_collection()
+    collection.delete(where={"doc_id": doc_id})
+    unregister_document(doc_id)
 
 
 def query_vault(question: str, n_results: int = 5) -> list[dict]:
@@ -296,7 +371,7 @@ def main():
     st.title("🏥 MedPhi — Medical Memory Vault")
     st.caption("Local-first. Privacy-obsessed. Your records, your machine.")
 
-    tab_upload, tab_query, tab_settings = st.tabs(["📤 Upload", "🔍 Query", "⚙️ Settings"])
+    tab_upload, tab_docs, tab_query, tab_settings = st.tabs(["📤 Upload", "📋 Documents", "🔍 Query", "⚙️ Settings"])
 
     # ── Upload Tab ──────────────────────────────────────────────────────────
     with tab_upload:
@@ -314,10 +389,18 @@ def main():
         )
 
         if uploaded and st.button("De-identify & Store", type="primary"):
-            pdf_bytes = uploaded.read()  # read once; reuse for both extraction and hashing
+            pdf_bytes = uploaded.read()  # read once; reuse for extraction and hashing
 
             with st.spinner("Extracting text from PDF..."):
-                raw_text = extract_text_from_pdf(pdf_bytes)
+                raw_text, used_ocr = extract_text_from_pdf(pdf_bytes)
+
+            if used_ocr:
+                st.info("Scanned PDF detected — OCR was used for text extraction.")
+            elif len(raw_text.strip()) < OCR_TEXT_THRESHOLD and not _OCR_AVAILABLE:
+                st.warning(
+                    "This PDF appears to be image-based but Tesseract is not installed. "
+                    "Install Tesseract for OCR support: https://github.com/UB-Mannheim/tesseract/wiki"
+                )
 
             with st.spinner("De-identifying (removing PII, shifting dates)..."):
                 clean_text, findings = deidentify(raw_text, config["date_offset_days"])
@@ -328,6 +411,7 @@ def main():
                 "label": doc_label or uploaded.name,
                 "uploaded_at": datetime.now().isoformat(),
                 "pii_entities_found": len(findings),
+                "ocr": used_ocr,
             }
 
             with st.spinner("Embedding and writing to local vault..."):
@@ -341,6 +425,37 @@ def main():
             with st.expander("Preview de-identified text (first 3,000 chars)"):
                 preview = clean_text[:3000] + ("…" if len(clean_text) > 3000 else "")
                 st.text_area("De-identified output", preview, height=300)
+
+    # ── Documents Tab ───────────────────────────────────────────────────────
+    with tab_docs:
+        st.header("Vault Documents")
+
+        index = load_document_index()
+
+        if not index:
+            st.info("No documents stored yet. Upload a PDF to get started.")
+        else:
+            st.caption(f"{len(index)} document(s) in vault")
+            st.divider()
+
+            for doc_id, meta in index.items():
+                col_info, col_delete = st.columns([5, 1])
+                with col_info:
+                    label = meta.get("label", meta.get("filename", doc_id))
+                    st.markdown(f"**{label}**")
+                    uploaded_at = meta.get("uploaded_at", "")[:19].replace("T", " ")
+                    pii = meta.get("pii_entities_found", "?")
+                    chunks = meta.get("chunk_count", "?")
+                    ocr_tag = " · OCR" if meta.get("ocr") else ""
+                    st.caption(
+                        f"Uploaded: {uploaded_at} · {chunks} chunks · {pii} PII entities removed{ocr_tag} · ID: `{doc_id}`"
+                    )
+                with col_delete:
+                    if st.button("🗑 Delete", key=f"del_{doc_id}"):
+                        delete_document(doc_id)
+                        st.success(f"Deleted **{label}**.")
+                        st.rerun()
+                st.divider()
 
     # ── Query Tab ───────────────────────────────────────────────────────────
     with tab_query:
